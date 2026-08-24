@@ -12,6 +12,7 @@ from .database import async_session_maker
 from .models.suppliers import Supplier, Route
 from .models.events import Event, SeverityEnum
 from .models.predictions import RiskPrediction, MitigationStrategy
+from .services.output.alerting import raise_alert_for_prediction
 
 logger = logging.getLogger(__name__)
 
@@ -106,7 +107,8 @@ async def seed_if_empty():
                     model_output=f"Based on {SAMPLE_EVENTS[i]['type']} at {SAMPLE_EVENTS[i]['location']}, ML models project {round(prob,1)}% chance of supply chain impact."
                 )
                 session.add(pred)
-                
+                await raise_alert_for_prediction(pred, session)
+
                 # Add mitigation strategies for each prediction
                 strats = [
                     MitigationStrategy(id=str(uuid.uuid4()), prediction_id=pred.id, type="supplier", title="Activate Backup Supplier", description=f"Shift order volume to alternate supplier to avoid {SAMPLE_EVENTS[i]['location']} disruptions.", risk_reduction=round(random.uniform(30, 55), 1), cost_estimate=round(random.uniform(15000, 85000), 0), priority="high" if prob > 70 else "medium", status="pending"),

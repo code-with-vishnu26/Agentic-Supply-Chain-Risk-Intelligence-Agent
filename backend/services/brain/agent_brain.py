@@ -1,11 +1,13 @@
 import json
 import logging
+import uuid
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Dict, Any, Tuple
 
 from ...models.events import Event
 from ...models.predictions import RiskPrediction
 from ..memory.rag_pipeline import build_context
+from ..output.alerting import raise_alert_for_prediction
 from .risk_scorer import score_event
 from ...config import get_settings
 
@@ -39,6 +41,7 @@ async def generate_prediction(event: Event, context: str, risk_score: float) -> 
     )
     
     prediction = RiskPrediction(
+        id=str(uuid.uuid4()),
         event_id=event.id,
         title=f"Potential {event.type} Disruption",
         probability=probability,
@@ -70,8 +73,9 @@ async def process_event(event: Event, db: AsyncSession) -> Dict[str, Any]:
     
     db.add(prediction)
     event.processed = True
+    await raise_alert_for_prediction(prediction, db)
     await db.commit()
-    
+
     return {
         "classification": classification,
         "risk_score": risk_score,

@@ -20,11 +20,14 @@
 12. [Deployment](#12-deployment)
 13. [Gallery & Screenshots](#13-gallery--screenshots)
 14. [References](#14-references)
+15. [Closed-Loop Decision Engine (Update)](#15-closed-loop-decision-engine-update)
 
 ---
 
 ## 1. Abstract
 The system employs a multi-agent orchestration architecture powered by LangGraph, featuring five specialized agents — **Planner, Data Collection, RAG Knowledge Retrieval, Risk Analysis, and Decision Support** — that collaborate through a directed acyclic graph workflow. The platform integrates a hybrid AI architecture combining cloud-based models (OpenAI GPT-4o-mini) with a locally hosted offline model (Ollama Mistral-7B) for sensitive and low-latency reasoning. An XGBoost classifier trained on 10,000 samples predicts disruption probability, while a FAISS/ChromaDB-backed RAG pipeline retrieves historical context.
+
+> **Note:** Several of the claims above (LangGraph orchestration quality, OpenAI/Ollama hybrid reasoning, FAISS/ChromaDB retrieval) describe the intended design. In the current build, vector search fails to import (`ModelProfile` import error from `langchain_core`) and silently falls back to plain SQL — see [Section 15](#15-closed-loop-decision-engine-update) for what's actually verified working versus aspirational.
 
 ---
 
@@ -196,3 +199,26 @@ The system is containerized using Docker and Docker Compose.
 - [XGBoost Classifier](https://xgboost.readthedocs.io/)
 - [Ollama](https://ollama.ai/)
 - [React 19](https://react.dev/)
+
+---
+
+## 15. Closed-Loop Decision Engine (Update)
+
+### The problem
+The original build looked like a working decision-support system but wasn't one: acknowledging an alert or clicking "Apply Strategy" only flipped local React state via `setTimeout` — nothing was persisted, and applying a mitigation strategy never actually changed any risk score. Alternate-supplier and route-diversion recommendations were hardcoded stubs that ignored their input parameters. This update closes that loop.
+
+### What changed
+- **`backend/models/alerts.py`** (new) — a persisted `Alert` table (`active` → `acknowledged` → `resolved`), replacing the old behavior where `/output/alerts` derived a read-only list from recent events on every request.
+- **`backend/services/output/alerting.py`** (new) — `raise_alert_for_prediction()` fires whenever a `RiskPrediction` crosses a 65% probability threshold: persists the alert, dispatches a notification, and broadcasts it over the `alerts` WebSocket channel. Wired into event ingestion, the manual `/intelligence/analyze/{event_id}` path, and seed data.
+- **`backend/routers/decisions.py`** — `POST /strategies/{id}/apply` now does real work: it matches the strategy's prediction to an actual `Supplier`/`Route` row by keyword overlap (e.g. "Shanghai Port" → "Shanghai, China"), reduces that entity's `risk_score` by the strategy's stated `risk_reduction%`, and resolves the alert that triggered it — verified live: applying "Activate Backup Supplier" dropped a supplier's risk score 50.1 → 30.6 and auto-resolved the linked alert. `/suppliers/alternatives` and `/routes/diversions` now query real supplier/route data instead of returning the same two hardcoded entries regardless of input.
+- **`backend/routers/output.py`** — `/alerts` reads the persisted table with a `status` filter; added `POST /alerts/{id}/acknowledge` and `POST /alerts/{id}/resolve`.
+- **`src/pages/phase5/Alerts.jsx`** and **`src/pages/phase4/Mitigation.jsx`** — acknowledge/apply actions now call the real endpoints above and render the actual response, instead of a scripted spinner that always "succeeded" after a fixed delay.
+
+### Bugs found and fixed while verifying this end-to-end
+- `run_agent_workflow()` (an `async def`) was called without `await` in both `POST /ingestion/trigger` and `POST /ingestion/simulate-scenario` — i.e. the app's two "run the agent" actions have always thrown a 500. Pre-existing, unrelated to the changes above; found only by actually clicking the buttons.
+- A broken `abs(round(x), 1)` operator-precedence bug crashed `/decisions/suppliers/alternatives` whenever no `affected_supplier_id` was passed.
+
+### Honest status
+- **Verified working, live, in a browser**: simulate a scenario → real alert appears → acknowledge persists → apply a strategy → linked supplier/route risk score actually drops → alert auto-resolves.
+- **Still aspirational / not wired up**: FAISS/ChromaDB vector retrieval (import fails, falls back to plain SQL), real email/Slack delivery (notification service only logs), the OpenAI/Ollama hybrid reasoning split, and the "Contact Supplier" / "Activate Route" / "Order Buffer" sub-panels in Decision Support (still local-only UI state, not tied to the backend).
+- Risk-reduction-on-apply is a simulated formula (`risk_score × (1 − reduction%)`) applied at click time, not a measured outcome observed from new data. Treat this as a demonstration of a correct state-machine pattern, not a validated causal model.

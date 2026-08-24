@@ -3,6 +3,7 @@ import { motion } from 'framer-motion';
 import { ShieldCheck, ArrowDownToLine, Check, Loader2, Users, Navigation, Package, Globe, DollarSign, Clock, Ship } from 'lucide-react';
 import { getMitigationStrategies } from '../../data/dataEngine';
 import { useApi } from '../../hooks/useApi';
+import { apiClient } from '../../api/client';
 
 // Phase 4 — Alt. Suppliers Data
 const ALT_SUPPLIERS = [
@@ -36,6 +37,7 @@ const INVENTORY_BUFFERS = [
 export default function Mitigation() {
   const [strategies, setStrategies] = useState([]);
   const [applying, setApplying] = useState(null);
+  const [applyResults, setApplyResults] = useState({}); // id -> result message from backend
   const [activeSection, setActiveSection] = useState('strategies');
 
   // State for sub-sections
@@ -67,12 +69,25 @@ export default function Mitigation() {
     }
   }, [bStrats, isUsingFallback]);
 
-  const handleApply = (id) => {
+  const handleApply = async (id) => {
     setApplying(id);
-    setTimeout(() => {
+    try {
+      if (!isUsingFallback) {
+        const result = await apiClient.post(`/decisions/strategies/${id}/apply`, {});
+        const entity = result.affected_entity;
+        setApplyResults(prev => ({
+          ...prev,
+          [id]: entity
+            ? `Risk reduced on ${entity.name}: ${entity.risk_score_before} -> ${entity.risk_score_after}`
+            : (result.message || 'Strategy applied.'),
+        }));
+      }
       setStrategies(prev => prev.map(s => s.id === id ? { ...s, status: 'applied' } : s));
+    } catch {
+      setApplyResults(prev => ({ ...prev, [id]: 'Failed to apply strategy — please retry.' }));
+    } finally {
       setApplying(null);
-    }, 2000);
+    }
   };
 
   const handleContactSupplier = (id) => {
@@ -202,6 +217,11 @@ export default function Mitigation() {
                   </button>
                 )}
               </div>
+              {applyResults[strategy.id] && (
+                <div style={{ marginTop: '8px', fontSize: '0.75rem', color: 'var(--accent-emerald)' }}>
+                  {applyResults[strategy.id]}
+                </div>
+              )}
             </motion.div>
           ))}
         </div>

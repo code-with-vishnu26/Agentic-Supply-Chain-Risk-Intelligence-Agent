@@ -9,6 +9,7 @@ import time
 from ..database import get_db
 from ..schemas.events import EventResponse, IngestionStats
 from ..services.ingestion.event_ingestion import ingest_all_sources
+from ..services.output.alerting import raise_alert_for_prediction
 from ..models.events import Event, IngestionLog, SeverityEnum
 
 router = APIRouter()
@@ -93,7 +94,7 @@ async def trigger_ingestion(background_tasks: BackgroundTasks, db: AsyncSession 
         
         # Run true agent pipeline
         event_dict = {"id": event.id, "type": event.type, "location": event.location, "severity": event.severity.value if hasattr(event.severity, 'value') else event.severity, "description": event.description}
-        agent_result = run_agent_workflow(event_dict)
+        agent_result = await run_agent_workflow(event_dict)
         
         # Save Predictions and Strategies from Agent
         pred = RiskPrediction(
@@ -109,7 +110,8 @@ async def trigger_ingestion(background_tasks: BackgroundTasks, db: AsyncSession 
             model_output=agent_result["final_report"]
         )
         db.add(pred)
-        
+        await raise_alert_for_prediction(pred, db)
+
         for st in agent_result["mitigation_strategies"]:
             ms = MitigationStrategy(
                 id=str(uuid.uuid4()),
@@ -196,7 +198,7 @@ async def simulate_scenario(scenario: str, db: AsyncSession = Depends(get_db)):
     
     # True Agentic Workflow execution
     event_dict = {"id": event.id, "type": event.type, "location": event.location, "severity": raw["severity"], "description": event.description}
-    agent_result = run_agent_workflow(event_dict)
+    agent_result = await run_agent_workflow(event_dict)
     
     pred = RiskPrediction(
         id=str(uuid.uuid4()),
@@ -211,7 +213,8 @@ async def simulate_scenario(scenario: str, db: AsyncSession = Depends(get_db)):
         model_output=agent_result["final_report"]
     )
     db.add(pred)
-    
+    await raise_alert_for_prediction(pred, db)
+
     for st in agent_result["mitigation_strategies"]:
         ms = MitigationStrategy(
             id=str(uuid.uuid4()),

@@ -4,6 +4,7 @@ import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from 'recharts';
 import { Bell, BellOff, Check, Clock, Settings, History, Loader2 } from 'lucide-react';
 import { getAlerts, getAlertHistory } from '../../data/dataEngine';
 import { useApi } from '../../hooks/useApi';
+import { apiClient } from '../../api/client';
 
 const SEVERITY_COLORS = { critical: '#ef4444', high: '#f97316', medium: '#f59e0b', low: '#10b981' };
 
@@ -13,7 +14,7 @@ export default function Alerts() {
   const [activeTab, setActiveTab] = useState('active');
   const [acknowledging, setAcknowledging] = useState(null);
 
-  const { data: bAlerts, isUsingFallback } = useApi('/output/alerts?limit=15', { fallbackFn: getAlerts });
+  const { data: bAlerts, isUsingFallback, refetch } = useApi('/output/alerts?limit=30', { fallbackFn: getAlerts });
 
   useEffect(() => {
     if (bAlerts) {
@@ -21,18 +22,26 @@ export default function Alerts() {
         setAlerts(bAlerts);
         setHistory(getAlertHistory());
       } else {
-        setAlerts(bAlerts.map(a => ({
+        const mapped = bAlerts.map(a => ({
           id: a.id,
           title: a.title,
           severity: a.severity,
-          channel: 'Email',
-          threshold: 'Auto-detected',
+          channel: 'Email + Slack',
+          threshold: a.message,
           triggered: 1,
           lastTriggered: a.timestamp,
-          status: 'active',
+          status: a.status, // "active" | "acknowledged" | "resolved"
+          resolvedAt: a.resolved_at,
           enabled: true
-        })));
-        setHistory(getAlertHistory());
+        }));
+        setAlerts(mapped.filter(a => a.status !== 'resolved'));
+        setHistory(mapped
+          .filter(a => a.status !== 'active')
+          .map(a => ({
+            id: a.id, title: a.title, severity: a.severity,
+            timestamp: a.lastTriggered, resolvedAt: a.resolvedAt,
+            acknowledged: true,
+          })));
       }
     }
   }, [bAlerts, isUsingFallback]);
@@ -41,25 +50,29 @@ export default function Alerts() {
     setAlerts(prev => prev.map(a => a.id === id ? { ...a, enabled: !a.enabled } : a));
   };
 
-  const acknowledgeAlert = (id) => {
+  const acknowledgeAlert = async (id) => {
     setAcknowledging(id);
-    setTimeout(() => {
-      setAlerts(prev => prev.map(a => a.id === id ? { ...a, status: 'acknowledged' } : a));
-      
-      const alertToAck = alerts.find(a => a.id === id);
-      if (alertToAck) {
-        const historyEntry = {
-          id: `hist-${Date.now()}`,
-          title: alertToAck.title,
-          severity: alertToAck.severity,
-          timestamp: alertToAck.lastTriggered || new Date().toISOString(),
-          resolvedAt: new Date().toISOString(),
-          acknowledged: true
-        };
-        setHistory(prev => [historyEntry, ...prev]);
+    try {
+      if (!isUsingFallback) {
+        await apiClient.post(`/output/alerts/${id}/acknowledge`, {});
+        await refetch();
+      } else {
+        setAlerts(prev => prev.map(a => a.id === id ? { ...a, status: 'acknowledged' } : a));
+        const alertToAck = alerts.find(a => a.id === id);
+        if (alertToAck) {
+          setHistory(prev => [{
+            id: `hist-${Date.now()}`,
+            title: alertToAck.title,
+            severity: alertToAck.severity,
+            timestamp: alertToAck.lastTriggered || new Date().toISOString(),
+            resolvedAt: new Date().toISOString(),
+            acknowledged: true
+          }, ...prev]);
+        }
       }
+    } finally {
       setAcknowledging(null);
-    }, 1000);
+    }
   };
 
   const severityDist = Object.entries(

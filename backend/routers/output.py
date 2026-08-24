@@ -1,13 +1,14 @@
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Response, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 from pydantic import BaseModel
 import datetime
 
 from ..database import get_db
-from ..models.events import Event, SeverityEnum
+from ..models.events import Event
 from ..models.feedback import Feedback, TrainingRun
 from ..models.predictions import RiskPrediction
+from ..models.alerts import Alert
 
 router = APIRouter()
 
@@ -33,28 +34,62 @@ async def download_report(report_id: str):
     return Response(content=pdf_bytes, media_type="application/pdf")
 
 @router.get("/alerts")
-async def get_alerts(db: AsyncSession = Depends(get_db)):
-    """Get active alerts based on recent high-severity events."""
-    result = await db.execute(
-        select(Event)
-        .where(Event.severity.in_([SeverityEnum.critical, SeverityEnum.high]))
-        .order_by(Event.timestamp.desc())
-        .limit(10)
-    )
-    events = result.scalars().all()
-    
-    alerts = []
-    for e in events:
-        alerts.append({
-            "id": e.id,
-            "type": e.source,
-            "severity": e.severity.value if e.severity else "medium",
-            "message": f"{e.type}: {e.description[:100]}" if e.description else e.type,
-            "location": e.location,
-            "timestamp": e.timestamp.isoformat() if e.timestamp else None
-        })
-    
-    return alerts
+async def get_alerts(
+    status: str = Query(None, description="Filter by status (active, acknowledged, resolved)"),
+    limit: int = 20,
+    db: AsyncSession = Depends(get_db),
+):
+    """Get persisted alerts raised by the agent when a prediction crosses the notification threshold."""
+    stmt = select(Alert).order_by(Alert.created_at.desc())
+    if status:
+        stmt = stmt.where(Alert.status == status)
+    result = await db.execute(stmt.limit(limit))
+    alerts = result.scalars().all()
+
+    return [
+        {
+            "id": a.id,
+            "event_id": a.event_id,
+            "prediction_id": a.prediction_id,
+            "title": a.title,
+            "severity": a.severity,
+            "message": a.message,
+            "status": a.status,
+            "timestamp": a.created_at.isoformat() if a.created_at else None,
+            "acknowledged_at": a.acknowledged_at.isoformat() if a.acknowledged_at else None,
+            "resolved_at": a.resolved_at.isoformat() if a.resolved_at else None,
+        }
+        for a in alerts
+    ]
+
+
+@router.post("/alerts/{alert_id}/acknowledge")
+async def acknowledge_alert(alert_id: str, db: AsyncSession = Depends(get_db)):
+    """Mark an alert as acknowledged (a human has seen it and is on it)."""
+    alert = await db.scalar(select(Alert).where(Alert.id == alert_id))
+    if not alert:
+        raise HTTPException(status_code=404, detail="Alert not found")
+
+    if alert.status == "active":
+        alert.status = "acknowledged"
+        alert.acknowledged_at = datetime.datetime.utcnow()
+        await db.commit()
+
+    return {"status": "success", "id": alert.id, "alert_status": alert.status}
+
+
+@router.post("/alerts/{alert_id}/resolve")
+async def resolve_alert(alert_id: str, db: AsyncSession = Depends(get_db)):
+    """Mark an alert as resolved (the underlying risk has been mitigated or dismissed)."""
+    alert = await db.scalar(select(Alert).where(Alert.id == alert_id))
+    if not alert:
+        raise HTTPException(status_code=404, detail="Alert not found")
+
+    alert.status = "resolved"
+    alert.resolved_at = datetime.datetime.utcnow()
+    await db.commit()
+
+    return {"status": "success", "id": alert.id, "alert_status": alert.status}
 
 @router.post("/feedback")
 async def submit_feedback(data: FeedbackSubmit, db: AsyncSession = Depends(get_db)):
